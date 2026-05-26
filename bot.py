@@ -142,7 +142,7 @@ async def generate_post(topic: str, category: str, instructions: str) -> str:
         logger.error(f"AI error: {e}")
         return None
 
-# ---------- HANDLERS ----------
+# ---------- UI HELPERS ----------
 def main_menu(user_id):
     channels = get_user_channels(user_id)
     kb = []
@@ -154,6 +154,60 @@ def main_menu(user_id):
     kb.append([InlineKeyboardButton("ℹ️ Help", callback_data="help")])
     return InlineKeyboardMarkup(kb)
 
+def channel_detail_view(ch):
+    chat_id = ch["id"]
+    status = "🟢 Active" if ch.get("active") else "⚪ Paused"
+    topic = ch.get("topic") or "_not set_"
+    next_cat = POST_CATEGORIES[ch.get("category_index", 0)][0]
+
+    today = datetime.now(timezone.utc).date().isoformat()
+    done = ch.get("posts_today", 0) if ch.get("last_post_date") == today else 0
+    remaining = max(0, POSTS_PER_DAY - done)
+    filled = int((done / POSTS_PER_DAY) * 10)
+    bar = "🟩" * filled + "⬜" * (10 - filled)
+    percent = int((done / POSTS_PER_DAY) * 100)
+    progress_text = (
+        f"\n📊 *Today's Progress*\n"
+        f"{bar} {percent}%\n"
+        f"✅ {done} post{'s' if done != 1 else ''} done — {remaining} more to go"
+    )
+
+    npt = ch.get("next_post_time")
+    countdown_text = ""
+    if ch.get("active") and npt:
+        try:
+            npt_dt = datetime.fromisoformat(npt)
+            delta = npt_dt - datetime.now(timezone.utc)
+            mins = int(delta.total_seconds() / 60)
+            if mins > 0:
+                countdown_text = f"\n⏳ Next post in ~{mins} min"
+            else:
+                countdown_text = f"\n⏳ Next post: due now"
+        except Exception:
+            pass
+
+    kb = [
+        [InlineKeyboardButton("✏️ Set Topic", callback_data=f"settopic:{chat_id}")],
+        [InlineKeyboardButton(
+            "⏸ Pause" if ch.get("active") else "▶️ Activate",
+            callback_data=f"toggle:{chat_id}"
+        )],
+        [InlineKeyboardButton("📝 Post Now (test)", callback_data=f"postnow:{chat_id}")],
+        [InlineKeyboardButton("🔄 Refresh", callback_data=f"channel:{chat_id}")],
+        [InlineKeyboardButton("🗑 Remove", callback_data=f"remove:{chat_id}")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="back")],
+    ]
+    text = (
+        f"📺 *{ch['title']}*\n\n"
+        f"Status: {status}\n"
+        f"Topic: {topic}\n"
+        f"Next category: *{next_cat}*"
+        f"{progress_text}"
+        f"{countdown_text}"
+    )
+    return text, InlineKeyboardMarkup(kb)
+
+# ---------- HANDLERS ----------
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     channels = get_user_channels(user.id)
@@ -251,59 +305,11 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not ch:
             await q.edit_message_text("❌ Channel not found.", reply_markup=main_menu(user_id))
             return
-        status = "🟢 Active" if ch.get("active") else "⚪ Paused"
-        topic = ch.get("topic") or "_not set_"
-        next_cat = POST_CATEGORIES[ch.get("category_index", 0)][0]
-
-        # --- daily progress bar ---
-        today = datetime.now(timezone.utc).date().isoformat()
-        done = ch.get("posts_today", 0) if ch.get("last_post_date") == today else 0
-        remaining = max(0, POSTS_PER_DAY - done)
-        filled = int((done / POSTS_PER_DAY) * 10)
-        bar = "🟩" * filled + "⬜" * (10 - filled)
-        percent = int((done / POSTS_PER_DAY) * 100)
-        progress_text = (
-            f"\n📊 *Today's Progress*\n"
-            f"{bar} {percent}%\n"
-            f"✅ {done} post{'s' if done != 1 else ''} done — {remaining} more to go"
-        )
-
-        # next post countdown
-        npt = ch.get("next_post_time")
-        countdown_text = ""
-        if ch.get("active") and npt:
-            try:
-                npt_dt = datetime.fromisoformat(npt)
-                delta = npt_dt - datetime.now(timezone.utc)
-                mins = int(delta.total_seconds() / 60)
-                if mins > 0:
-                    countdown_text = f"\n⏳ Next post in ~{mins} min"
-                else:
-                    countdown_text = f"\n⏳ Next post: due now"
-            except Exception:
-                pass
-
-        kb = [
-            [InlineKeyboardButton("✏️ Set Topic", callback_data=f"settopic:{chat_id}")],
-            [InlineKeyboardButton(
-                "⏸ Pause" if ch.get("active") else "▶️ Activate",
-                callback_data=f"toggle:{chat_id}"
-            )],
-            [InlineKeyboardButton("📝 Post Now (test)", callback_data=f"postnow:{chat_id}")],
-            [InlineKeyboardButton("🔄 Refresh", callback_data=f"channel:{chat_id}")],
-            [InlineKeyboardButton("🗑 Remove", callback_data=f"remove:{chat_id}")],
-            [InlineKeyboardButton("⬅️ Back", callback_data="back")],
-        ]
-        await q.edit_message_text(
-            f"📺 *{ch['title']}*\n\n"
-            f"Status: {status}\n"
-            f"Topic: {topic}\n"
-            f"Next category: *{next_cat}*"
-            f"{progress_text}"
-            f"{countdown_text}",
-            reply_markup=InlineKeyboardMarkup(kb),
-            parse_mode="Markdown",
-        )
+        text, kb = channel_detail_view(ch)
+        try:
+            await q.edit_message_text(text, reply_markup=kb, parse_mode="Markdown")
+        except Exception:
+            pass
         return
 
     if data.startswith("settopic:"):
@@ -320,18 +326,45 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id = int(data.split(":")[1])
         ch = find_channel(user_id, chat_id)
         if not ch:
+            await q.answer("Channel not found", show_alert=True)
             return
         if not ch.get("topic"):
-            await q.answer("Set the topic first!", show_alert=True)
+            await q.answer("⚠️ Set the topic first!", show_alert=True)
             return
         new_active = not ch.get("active")
         updates = {"active": new_active}
-        if new_active and not ch.get("next_post_time"):
+        if new_active:
+            # post immediately on activation
             updates["next_post_time"] = datetime.now(timezone.utc).isoformat()
         update_channel(user_id, chat_id, **updates)
-        await q.answer("✅ Updated")
-        q.data = f"channel:{chat_id}"
-        await menu_callback(update, context)
+
+        if new_active:
+            await q.answer("✅ Activated!", show_alert=True)
+            await context.bot.send_message(
+                user_id,
+                f"🚀 *Auto-posting STARTED* for *{ch['title']}*\n\n"
+                f"📝 Topic: _{ch.get('topic')}_\n"
+                f"📊 Schedule: {POSTS_PER_DAY} posts/day\n"
+                f"⏰ Active hours: {ACTIVE_START_HOUR}:00–{ACTIVE_END_HOUR}:00 UTC\n"
+                f"🔁 Cycle: why → important → history → fun fact → quiz → tips\n\n"
+                f"⏳ First post coming within 1 minute…",
+                parse_mode="Markdown",
+            )
+        else:
+            await q.answer("⏸ Paused", show_alert=True)
+            await context.bot.send_message(
+                user_id,
+                f"⏸ *Auto-posting PAUSED* for *{ch['title']}*\n\nTap ▶️ Activate to resume.",
+                parse_mode="Markdown",
+            )
+
+        # refresh view
+        ch = find_channel(user_id, chat_id)
+        text, kb = channel_detail_view(ch)
+        try:
+            await q.edit_message_text(text, reply_markup=kb, parse_mode="Markdown")
+        except Exception:
+            pass
         return
 
     if data.startswith("postnow:"):
@@ -399,7 +432,7 @@ async def do_post(context: ContextTypes.DEFAULT_TYPE, user_id: int, chat_id: int
         next_post_time=next_time.isoformat(),
     )
 
-    # --- notify user with progress bar ---
+    # notify user with progress
     remaining = max(0, POSTS_PER_DAY - posts_today)
     filled = int((posts_today / POSTS_PER_DAY) * 10)
     bar = "🟩" * filled + "⬜" * (10 - filled)
