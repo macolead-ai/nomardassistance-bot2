@@ -150,4 +150,295 @@ def main_menu(user_id):
         status = "🟢" if ch.get("active") else "⚪"
         topic_set = "✏️" if ch.get("topic") else "❓"
         kb.append([InlineKeyboardButton(f"{status}{topic_set} {ch['title']}", callback_data=f"channel:{ch['id']}")])
-    kb.append([InlineKeyboardButton("➕ Add Channel", callback_da
+    kb.append([InlineKeyboardButton("➕ Add Channel", callback_data="add_channel")])
+    kb.append([InlineKeyboardButton("ℹ️ Help", callback_data="help")])
+    return InlineKeyboardMarkup(kb)
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    channels = get_user_channels(user.id)
+    text = (
+        f"👋 Hi {user.first_name}!\n\n"
+        f"🤖 *AI Channel Auto-Poster*\n\n"
+        f"I post to your channels {POSTS_PER_DAY}× per day, with fresh AI-generated content rotating through:\n"
+        f"💡 Why • ⭐ Important • 📜 History • 🎉 Fun Fact • ❓ Quiz • 💪 Tips\n\n"
+    )
+    if not channels:
+        text += "Click *➕ Add Channel* to begin."
+    else:
+        text += f"You have {len(channels)} channel(s) connected. Tap one to manage."
+    text += f"\n\n_Powered by {AI_PROVIDER or '⚠️ No AI configured'}_"
+    await update.message.reply_text(text, reply_markup=main_menu(user.id), parse_mode="Markdown")
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "📚 *How it works*\n\n"
+        "1️⃣ Add me as *Admin* to your channel\n"
+        "2️⃣ I'll detect it automatically — no IDs needed\n"
+        "3️⃣ Set your channel topic (e.g. 'Teaching English to Arabic speakers')\n"
+        f"4️⃣ Activate auto-posting — I'll post {POSTS_PER_DAY}× per day\n\n"
+        "*Content cycle:*\n"
+        "💡 Why → ⭐ Important → 📜 History → 🎉 Fun Fact → ❓ Quiz → 💪 Tips → 🔁 repeat\n\n"
+        f"⏰ Posts run between {ACTIVE_START_HOUR}:00–{ACTIVE_END_HOUR}:00 UTC, every ~{INTERVAL_MINUTES} min\n\n"
+        "Commands: /start /help /cancel"
+    )
+    if update.callback_query:
+        await update.callback_query.message.reply_text(text, parse_mode="Markdown")
+    else:
+        await update.message.reply_text(text, parse_mode="Markdown")
+
+async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+    await update.message.reply_text("❌ Cancelled.", reply_markup=main_menu(update.effective_user.id))
+    return ConversationHandler.END
+
+async def my_chat_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cmu = update.my_chat_member
+    if cmu.chat.type != "channel":
+        return
+    new_status = cmu.new_chat_member.status
+    actor = cmu.from_user
+    if not actor:
+        return
+    if new_status in ("administrator",):
+        add_channel(actor.id, cmu.chat.id, cmu.chat.title or "Untitled")
+        try:
+            await context.bot.send_message(
+                actor.id,
+                f"✅ Channel *{cmu.chat.title}* linked!\n\nNow set its topic so I can generate content.",
+                reply_markup=main_menu(actor.id),
+                parse_mode="Markdown",
+            )
+        except Exception:
+            pass
+    elif new_status in ("left", "kicked", "member"):
+        remove_channel(actor.id, cmu.chat.id)
+        try:
+            await context.bot.send_message(actor.id, f"⚠️ Lost admin in *{cmu.chat.title}* — removed.", parse_mode="Markdown")
+        except Exception:
+            pass
+
+async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    data = q.data
+    user_id = q.from_user.id
+
+    if data == "add_channel":
+        await q.message.reply_text(
+            "➕ *Add a channel*\n\n"
+            "1. Open your channel\n2. Settings → Administrators → Add Admin\n"
+            "3. Search my username and add me\n4. I'll detect it instantly ✅",
+            parse_mode="Markdown",
+        )
+        return
+
+    if data == "help":
+        await help_command(update, context)
+        return
+
+    if data == "back":
+        await q.edit_message_text(
+            "📋 *Your Channels*",
+            reply_markup=main_menu(user_id),
+            parse_mode="Markdown",
+        )
+        return
+
+    if data.startswith("channel:"):
+        chat_id = int(data.split(":")[1])
+        ch = find_channel(user_id, chat_id)
+        if not ch:
+            await q.edit_message_text("❌ Channel not found.", reply_markup=main_menu(user_id))
+            return
+        status = "🟢 Active" if ch.get("active") else "⚪ Paused"
+        topic = ch.get("topic") or "_not set_"
+        next_cat = POST_CATEGORIES[ch.get("category_index", 0)][0]
+        kb = [
+            [InlineKeyboardButton("✏️ Set Topic", callback_data=f"settopic:{chat_id}")],
+            [InlineKeyboardButton(
+                "⏸ Pause" if ch.get("active") else "▶️ Activate",
+                callback_data=f"toggle:{chat_id}"
+            )],
+            [InlineKeyboardButton("📝 Post Now (test)", callback_data=f"postnow:{chat_id}")],
+            [InlineKeyboardButton("🗑 Remove", callback_data=f"remove:{chat_id}")],
+            [InlineKeyboardButton("⬅️ Back", callback_data="back")],
+        ]
+        await q.edit_message_text(
+            f"📺 *{ch['title']}*\n\n"
+            f"Status: {status}\nTopic: {topic}\nNext category: *{next_cat}*\n"
+            f"Posts today: {ch.get('posts_today', 0)}/{POSTS_PER_DAY}",
+            reply_markup=InlineKeyboardMarkup(kb),
+            parse_mode="Markdown",
+        )
+        return
+
+    if data.startswith("settopic:"):
+        chat_id = int(data.split(":")[1])
+        context.user_data["topic_chat_id"] = chat_id
+        await q.message.reply_text(
+            "✏️ Send me the topic / instructions for this channel.\n\n"
+            "Example: _Teaching English grammar to Arabic speakers — beginner to intermediate._",
+            parse_mode="Markdown",
+        )
+        return WAITING_TOPIC
+
+    if data.startswith("toggle:"):
+        chat_id = int(data.split(":")[1])
+        ch = find_channel(user_id, chat_id)
+        if not ch:
+            return
+        if not ch.get("topic"):
+            await q.answer("Set the topic first!", show_alert=True)
+            return
+        new_active = not ch.get("active")
+        updates = {"active": new_active}
+        if new_active and not ch.get("next_post_time"):
+            updates["next_post_time"] = datetime.now(timezone.utc).isoformat()
+        update_channel(user_id, chat_id, **updates)
+        await q.answer("✅ Updated")
+        # refresh
+        q.data = f"channel:{chat_id}"
+        await menu_callback(update, context)
+        return
+
+    if data.startswith("postnow:"):
+        chat_id = int(data.split(":")[1])
+        await q.answer("Generating…")
+        await do_post(context, user_id, chat_id, force=True)
+        return
+
+    if data.startswith("remove:"):
+        chat_id = int(data.split(":")[1])
+        remove_channel(user_id, chat_id)
+        await q.edit_message_text("🗑 Removed.", reply_markup=main_menu(user_id))
+        return
+
+async def receive_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = context.user_data.get("topic_chat_id")
+    if not chat_id:
+        return ConversationHandler.END
+    topic = update.message.text.strip()
+    if len(topic) < 5:
+        await update.message.reply_text("Topic too short. Try again or /cancel.")
+        return WAITING_TOPIC
+    update_channel(update.effective_user.id, chat_id, topic=topic)
+    context.user_data.clear()
+    await update.message.reply_text(
+        f"✅ Topic saved!\n\nNow tap *▶️ Activate* to start auto-posting.",
+        reply_markup=main_menu(update.effective_user.id),
+        parse_mode="Markdown",
+    )
+    return ConversationHandler.END
+
+# ---------- POSTING LOGIC ----------
+async def do_post(context: ContextTypes.DEFAULT_TYPE, user_id: int, chat_id: int, force: bool = False):
+    ch = find_channel(user_id, chat_id)
+    if not ch or not ch.get("topic"):
+        return
+    cat_name, cat_instructions = POST_CATEGORIES[ch.get("category_index", 0) % len(POST_CATEGORIES)]
+    content = await generate_post(ch["topic"], cat_name, cat_instructions)
+    if not content:
+        try:
+            await context.bot.send_message(user_id, f"⚠️ AI failed for *{ch['title']}*.", parse_mode="Markdown")
+        except Exception:
+            pass
+        return
+    try:
+        await context.bot.send_message(chat_id, content)
+    except Exception as e:
+        logger.error(f"Failed to post to {chat_id}: {e}")
+        try:
+            await context.bot.send_message(user_id, f"❌ Failed to post to *{ch['title']}*: {e}", parse_mode="Markdown")
+        except Exception:
+            pass
+        return
+
+    today = datetime.now(timezone.utc).date().isoformat()
+    posts_today = ch.get("posts_today", 0)
+    if ch.get("last_post_date") != today:
+        posts_today = 0
+    posts_today += 1
+    next_time = datetime.now(timezone.utc) + timedelta(minutes=INTERVAL_MINUTES)
+    update_channel(user_id, chat_id,
+        category_index=(ch.get("category_index", 0) + 1) % len(POST_CATEGORIES),
+        posts_today=posts_today,
+        last_post_date=today,
+        next_post_time=next_time.isoformat(),
+    )
+
+async def scheduler_loop(app: Application):
+    await asyncio.sleep(10)
+    while True:
+        try:
+            now = datetime.now(timezone.utc)
+            data = load_data()
+            for uid_str, channels in data.items():
+                user_id = int(uid_str)
+                for ch in channels:
+                    if not ch.get("active") or not ch.get("topic"):
+                        continue
+                    today = now.date().isoformat()
+                    posts_today = ch.get("posts_today", 0) if ch.get("last_post_date") == today else 0
+                    if posts_today >= POSTS_PER_DAY:
+                        continue
+                    if not (ACTIVE_START_HOUR <= now.hour < ACTIVE_END_HOUR):
+                        continue
+                    npt = ch.get("next_post_time")
+                    if npt:
+                        try:
+                            npt_dt = datetime.fromisoformat(npt)
+                        except Exception:
+                            npt_dt = now
+                        if now < npt_dt:
+                            continue
+                    # post
+                    ctx = ContextTypes.DEFAULT_TYPE(application=app, chat_id=None, user_id=user_id)
+                    await do_post(ctx, user_id, ch["id"])
+        except Exception as e:
+            logger.error(f"Scheduler error: {e}")
+        await asyncio.sleep(60)
+
+# ---------- HEALTH SERVER ----------
+async def health(request):
+    return web.Response(text="OK")
+
+async def run_web():
+    app = web.Application()
+    app.router.add_get("/", health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    logger.info(f"Health server on :{PORT}")
+
+# ---------- MAIN ----------
+async def post_init(app: Application):
+    asyncio.create_task(run_web())
+    asyncio.create_task(scheduler_loop(app))
+
+def main():
+    if not BOT_TOKEN:
+        raise RuntimeError("BOT_TOKEN missing")
+    if not ai_client:
+        logger.warning("No DEEPSEEK_API_KEY or OPENAI_API_KEY set — AI generation disabled")
+
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+
+    topic_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(menu_callback, pattern=r"^settopic:")],
+        states={WAITING_TOPIC: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_topic)]},
+        fallbacks=[CommandHandler("cancel", cancel_command)],
+    )
+
+    app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("cancel", cancel_command))
+    app.add_handler(topic_conv)
+    app.add_handler(CallbackQueryHandler(menu_callback))
+    app.add_handler(ChatMemberHandler(my_chat_member_handler, ChatMemberHandler.MY_CHAT_MEMBER))
+
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+if __name__ == "__main__":
+    main()
