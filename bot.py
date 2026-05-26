@@ -254,6 +254,35 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         status = "🟢 Active" if ch.get("active") else "⚪ Paused"
         topic = ch.get("topic") or "_not set_"
         next_cat = POST_CATEGORIES[ch.get("category_index", 0)][0]
+
+        # --- daily progress bar ---
+        today = datetime.now(timezone.utc).date().isoformat()
+        done = ch.get("posts_today", 0) if ch.get("last_post_date") == today else 0
+        remaining = max(0, POSTS_PER_DAY - done)
+        filled = int((done / POSTS_PER_DAY) * 10)
+        bar = "🟩" * filled + "⬜" * (10 - filled)
+        percent = int((done / POSTS_PER_DAY) * 100)
+        progress_text = (
+            f"\n📊 *Today's Progress*\n"
+            f"{bar} {percent}%\n"
+            f"✅ {done} post{'s' if done != 1 else ''} done — {remaining} more to go"
+        )
+
+        # next post countdown
+        npt = ch.get("next_post_time")
+        countdown_text = ""
+        if ch.get("active") and npt:
+            try:
+                npt_dt = datetime.fromisoformat(npt)
+                delta = npt_dt - datetime.now(timezone.utc)
+                mins = int(delta.total_seconds() / 60)
+                if mins > 0:
+                    countdown_text = f"\n⏳ Next post in ~{mins} min"
+                else:
+                    countdown_text = f"\n⏳ Next post: due now"
+            except Exception:
+                pass
+
         kb = [
             [InlineKeyboardButton("✏️ Set Topic", callback_data=f"settopic:{chat_id}")],
             [InlineKeyboardButton(
@@ -261,13 +290,17 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 callback_data=f"toggle:{chat_id}"
             )],
             [InlineKeyboardButton("📝 Post Now (test)", callback_data=f"postnow:{chat_id}")],
+            [InlineKeyboardButton("🔄 Refresh", callback_data=f"channel:{chat_id}")],
             [InlineKeyboardButton("🗑 Remove", callback_data=f"remove:{chat_id}")],
             [InlineKeyboardButton("⬅️ Back", callback_data="back")],
         ]
         await q.edit_message_text(
             f"📺 *{ch['title']}*\n\n"
-            f"Status: {status}\nTopic: {topic}\nNext category: *{next_cat}*\n"
-            f"Posts today: {ch.get('posts_today', 0)}/{POSTS_PER_DAY}",
+            f"Status: {status}\n"
+            f"Topic: {topic}\n"
+            f"Next category: *{next_cat}*"
+            f"{progress_text}"
+            f"{countdown_text}",
             reply_markup=InlineKeyboardMarkup(kb),
             parse_mode="Markdown",
         )
@@ -297,7 +330,6 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             updates["next_post_time"] = datetime.now(timezone.utc).isoformat()
         update_channel(user_id, chat_id, **updates)
         await q.answer("✅ Updated")
-        # refresh
         q.data = f"channel:{chat_id}"
         await menu_callback(update, context)
         return
@@ -367,6 +399,22 @@ async def do_post(context: ContextTypes.DEFAULT_TYPE, user_id: int, chat_id: int
         next_post_time=next_time.isoformat(),
     )
 
+    # --- notify user with progress bar ---
+    remaining = max(0, POSTS_PER_DAY - posts_today)
+    filled = int((posts_today / POSTS_PER_DAY) * 10)
+    bar = "🟩" * filled + "⬜" * (10 - filled)
+    percent = int((posts_today / POSTS_PER_DAY) * 100)
+    try:
+        await context.bot.send_message(
+            user_id,
+            f"✅ Posted *{cat_name}* to *{ch['title']}*\n\n"
+            f"{bar} {percent}%\n"
+            f"📊 {posts_today}/{POSTS_PER_DAY} posts done — {remaining} more to go today",
+            parse_mode="Markdown",
+        )
+    except Exception:
+        pass
+
 async def scheduler_loop(app: Application):
     await asyncio.sleep(10)
     while True:
@@ -392,7 +440,6 @@ async def scheduler_loop(app: Application):
                             npt_dt = now
                         if now < npt_dt:
                             continue
-                    # post
                     ctx = ContextTypes.DEFAULT_TYPE(application=app, chat_id=None, user_id=user_id)
                     await do_post(ctx, user_id, ch["id"])
         except Exception as e:
