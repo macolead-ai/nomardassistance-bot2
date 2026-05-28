@@ -1,5 +1,5 @@
 """
-NomardDesk Bot V3.6 — bulletproof /importusers, broadcast, and Render health server.
+NomardDesk Bot V3.7 — /seedusers (hardcoded recovery), broadcast, health server.
 """
 
 import os
@@ -22,6 +22,20 @@ TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_USER_ID", "0"))
 DATABASE_URL = os.getenv("DATABASE_URL")
 
+# ===== YOUR 47 RECOVERED USER IDs =====
+RECOVERED_IDS = [
+    772758051, 805681275, 1203645899, 1207633006, 1583163625,
+    1657895659, 1782690036, 1986346664, 5165273599, 5167449615,
+    5573945248, 5648131967, 6093691916, 6120062742, 6210145007,
+    6419250678, 6619008379, 6821603801, 7026724352, 7092906593,
+    7163632964, 7458905624, 7563948651, 7622673318, 7654646782,
+    7709535766, 7750264799, 7842485130, 7872101098, 7899393912,
+    7914153378, 7916089388, 7945928449, 7998459837, 8005330964,
+    8020301075, 8065951240, 8066287900, 8300963414, 8308875423,
+    8318496822, 8351955477, 8497729259, 8636708852, 8647561557,
+    8658774544, 8718062854,
+]
+
 # ===== DATABASE =====
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL, sslmode='require')
@@ -40,7 +54,31 @@ def init_db():
 def generate_order_id():
     return '#' + ''.join(random.choices(string.digits, k=4))
 
-# ===== BULLETPROOF IMPORT RECOVERED USERS =====
+# ===== SEED RECOVERED USERS (no file needed) =====
+async def seed_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    try:
+        conn = get_db_connection(); cur = conn.cursor()
+        added = 0
+        for uid in RECOVERED_IDS:
+            cur.execute("""
+                INSERT INTO users (user_id, status)
+                VALUES (%s, 'Recovered')
+                ON CONFLICT (user_id) DO NOTHING;
+            """, (uid,))
+            added += cur.rowcount
+        conn.commit()
+        cur.execute("SELECT COUNT(*) FROM users;")
+        total = cur.fetchone()[0]
+        cur.close(); conn.close()
+        await update.message.reply_text(
+            f"✅ Seeded {len(RECOVERED_IDS)} recovered IDs ({added} new).\n📊 Total users in DB: {total}"
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Seed failed: {e}")
+
+# ===== IMPORT FROM FILE (backup option) =====
 async def import_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
@@ -51,55 +89,31 @@ async def import_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file = await context.bot.get_file(update.message.document.file_id)
         data_bytes = await file.download_as_bytearray()
         raw = data_bytes.decode("utf-8").strip()
-
         data = json.loads(raw)
-        if isinstance(data, str):  # double-encoded JSON
+        if isinstance(data, str):
             data = json.loads(data)
-
         if isinstance(data, dict):
-            if "users" in data and isinstance(data["users"], list):
-                items = data["users"]
-            else:
-                items = []
-                for k, v in data.items():
-                    if isinstance(v, dict):
-                        v.setdefault("user_id", k)
-                        items.append(v)
-                    else:
-                        items.append({"user_id": k})
+            items = data["users"] if "users" in data and isinstance(data["users"], list) else [
+                (v if isinstance(v, dict) else {"user_id": k}) for k, v in data.items()
+            ]
         elif isinstance(data, list):
             items = data
         else:
             await update.message.reply_text(f"❌ Unrecognized format: {type(data).__name__}")
             return
-
         conn = get_db_connection(); cur = conn.cursor()
         count, skipped = 0, 0
         for item in items:
-            if isinstance(item, dict):
-                uid = item.get("user_id")
-                uname = item.get("username")
-                oid = item.get("order_id")
-                st = item.get("status") or "Recovered"
-            elif isinstance(item, (int, str)):
-                uid = item
-                uname, oid, st = None, None, "Recovered"
-            else:
-                skipped += 1; continue
+            uid = item.get("user_id") if isinstance(item, dict) else item
             try:
                 uid = int(str(uid).strip())
             except (ValueError, TypeError):
                 skipped += 1; continue
-            cur.execute("""
-                INSERT INTO users (user_id, username, order_id, status)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (user_id) DO UPDATE SET status = EXCLUDED.status;
-            """, (uid, uname, oid, st))
+            cur.execute("INSERT INTO users (user_id, status) VALUES (%s, 'Recovered') ON CONFLICT (user_id) DO NOTHING;", (uid,))
             count += 1
         conn.commit(); cur.close(); conn.close()
-        msg = f"✅ Imported {count} users into the database."
-        if skipped:
-            msg += f"\n⚠️ Skipped {skipped} invalid entries."
+        msg = f"✅ Imported {count} users."
+        if skipped: msg += f"\n⚠️ Skipped {skipped} invalid entries."
         await update.message.reply_text(msg)
     except Exception as e:
         await update.message.reply_text(f"❌ Import failed: {e}")
@@ -266,7 +280,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn = get_db_connection(); cur = conn.cursor(); cur.execute("UPDATE users SET status = %s WHERE user_id = %s;", (db_s[s_type], cid)); conn.commit(); cur.close(); conn.close()
         await context.bot.send_message(chat_id=cid, text=s_map[s_type]); await query.edit_message_text(f"✅ Updated client {cid}.")
 
-# ===== HEALTH SERVER (keeps Render Web Service alive) =====
+# ===== HEALTH SERVER =====
 async def health(request):
     return web.Response(text="NomardDesk Bot is alive")
 
@@ -288,9 +302,10 @@ if __name__ == '__main__':
     init_db()
     app = ApplicationBuilder().token(TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("seedusers", seed_users))
     app.add_handler(CommandHandler("importusers", import_users))
     app.add_handler(MessageHandler(filters.Document.ALL & filters.CaptionRegex(r"^/importusers"), import_users))
     app.add_handler(MessageHandler((filters.TEXT | filters.PHOTO | filters.Document.ALL) & (~filters.COMMAND), handle_messages))
     app.add_handler(CallbackQueryHandler(handle_callback))
-    logging.info("NomardDesk Bot V3.6 Active.")
+    logging.info("NomardDesk Bot V3.7 Active.")
     app.run_polling()
