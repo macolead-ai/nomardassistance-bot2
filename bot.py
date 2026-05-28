@@ -1,5 +1,5 @@
 """
-NomardDesk Bot V3.5 — with /importusers recovery, broadcast, and Render health server.
+NomardDesk Bot V3.6 — bulletproof /importusers, broadcast, and Render health server.
 """
 
 import os
@@ -40,7 +40,7 @@ def init_db():
 def generate_order_id():
     return '#' + ''.join(random.choices(string.digits, k=4))
 
-# ===== IMPORT RECOVERED USERS =====
+# ===== BULLETPROOF IMPORT RECOVERED USERS =====
 async def import_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
@@ -50,18 +50,57 @@ async def import_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         file = await context.bot.get_file(update.message.document.file_id)
         data_bytes = await file.download_as_bytearray()
-        users = json.loads(data_bytes.decode())
+        raw = data_bytes.decode("utf-8").strip()
+
+        data = json.loads(raw)
+        if isinstance(data, str):  # double-encoded JSON
+            data = json.loads(data)
+
+        if isinstance(data, dict):
+            if "users" in data and isinstance(data["users"], list):
+                items = data["users"]
+            else:
+                items = []
+                for k, v in data.items():
+                    if isinstance(v, dict):
+                        v.setdefault("user_id", k)
+                        items.append(v)
+                    else:
+                        items.append({"user_id": k})
+        elif isinstance(data, list):
+            items = data
+        else:
+            await update.message.reply_text(f"❌ Unrecognized format: {type(data).__name__}")
+            return
+
         conn = get_db_connection(); cur = conn.cursor()
-        count = 0
-        for u in users:
+        count, skipped = 0, 0
+        for item in items:
+            if isinstance(item, dict):
+                uid = item.get("user_id")
+                uname = item.get("username")
+                oid = item.get("order_id")
+                st = item.get("status") or "Recovered"
+            elif isinstance(item, (int, str)):
+                uid = item
+                uname, oid, st = None, None, "Recovered"
+            else:
+                skipped += 1; continue
+            try:
+                uid = int(str(uid).strip())
+            except (ValueError, TypeError):
+                skipped += 1; continue
             cur.execute("""
                 INSERT INTO users (user_id, username, order_id, status)
                 VALUES (%s, %s, %s, %s)
                 ON CONFLICT (user_id) DO UPDATE SET status = EXCLUDED.status;
-            """, (u["user_id"], u.get("username"), u.get("order_id"), u.get("status") or "Recovered"))
+            """, (uid, uname, oid, st))
             count += 1
         conn.commit(); cur.close(); conn.close()
-        await update.message.reply_text(f"✅ Imported {count} users into the database.")
+        msg = f"✅ Imported {count} users into the database."
+        if skipped:
+            msg += f"\n⚠️ Skipped {skipped} invalid entries."
+        await update.message.reply_text(msg)
     except Exception as e:
         await update.message.reply_text(f"❌ Import failed: {e}")
 
@@ -253,5 +292,5 @@ if __name__ == '__main__':
     app.add_handler(MessageHandler(filters.Document.ALL & filters.CaptionRegex(r"^/importusers"), import_users))
     app.add_handler(MessageHandler((filters.TEXT | filters.PHOTO | filters.Document.ALL) & (~filters.COMMAND), handle_messages))
     app.add_handler(CallbackQueryHandler(handle_callback))
-    logging.info("NomardDesk Bot V3.5 Active.")
+    logging.info("NomardDesk Bot V3.6 Active.")
     app.run_polling()
