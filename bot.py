@@ -1,5 +1,5 @@
 """
-NomardDesk Bot V3.5 — with /importusers recovery command
+NomardDesk Bot V3.5 — with /importusers recovery, broadcast, and Render health server.
 """
 
 import os
@@ -8,6 +8,8 @@ import psycopg2
 import random
 import string
 import json
+import asyncio
+from aiohttp import web
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
@@ -20,6 +22,7 @@ TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_USER_ID", "0"))
 DATABASE_URL = os.getenv("DATABASE_URL")
 
+# ===== DATABASE =====
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL, sslmode='require')
 
@@ -37,7 +40,7 @@ def init_db():
 def generate_order_id():
     return '#' + ''.join(random.choices(string.digits, k=4))
 
-# ===== NEW: Import recovered users =====
+# ===== IMPORT RECOVERED USERS =====
 async def import_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
@@ -62,6 +65,7 @@ async def import_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Import failed: {e}")
 
+# ===== SERVICE DATA =====
 SVC_DATA = {
     'botdev': ("🤖 Bot Development", "Custom Telegram, Discord, and trading bots built for speed and reliability."),
     'n8n': ("⚡ n8n Automation", "Professional business automation to connect your apps and scale your workflow."),
@@ -78,6 +82,7 @@ SVC_DATA = {
     'custom': ("✨ Custom Service", "A specialized request tailored to your unique business needs.")
 }
 
+# ===== HANDLERS =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     username = update.effective_user.username or update.effective_user.first_name
@@ -171,7 +176,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("⚡ Broadcasting...")
         conn = get_db_connection(); cur = conn.cursor(); cur.execute("SELECT user_id FROM users;"); users = [u[0] for u in cur.fetchall()]; cur.close(); conn.close()
         s = 0
-        import asyncio
         for u in users:
             try:
                 if data['t'] == "text": await context.bot.send_message(chat_id=u, text=data['c'])
@@ -223,10 +227,27 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn = get_db_connection(); cur = conn.cursor(); cur.execute("UPDATE users SET status = %s WHERE user_id = %s;", (db_s[s_type], cid)); conn.commit(); cur.close(); conn.close()
         await context.bot.send_message(chat_id=cid, text=s_map[s_type]); await query.edit_message_text(f"✅ Updated client {cid}.")
 
+# ===== HEALTH SERVER (keeps Render Web Service alive) =====
+async def health(request):
+    return web.Response(text="NomardDesk Bot is alive")
+
+async def post_init(application):
+    web_app = web.Application()
+    web_app.router.add_get("/", health)
+    runner = web.AppRunner(web_app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 10000))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logging.info(f"Health server running on port {port}")
+
+# ===== MAIN =====
 if __name__ == '__main__':
-    if not TOKEN or not DATABASE_URL: exit(1)
+    if not TOKEN or not DATABASE_URL:
+        logging.error("Missing TELEGRAM_BOT_TOKEN or DATABASE_URL")
+        exit(1)
     init_db()
-    app = ApplicationBuilder().token(TOKEN).build()
+    app = ApplicationBuilder().token(TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("importusers", import_users))
     app.add_handler(MessageHandler(filters.Document.ALL & filters.CaptionRegex(r"^/importusers"), import_users))
